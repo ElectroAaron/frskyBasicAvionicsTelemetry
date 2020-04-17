@@ -1,5 +1,13 @@
 # FrSky Basic Avionics Telemetry
 
+## Wiring
+
+![Voltage divider](/images/wiring.png)
+
+
+
+## Code
+
 This project uses following libraries:
 
  - [FrSkySportTelemetry](https://github.com/cody82/FrSkySportTelemetry.git) by cody82
@@ -18,7 +26,7 @@ FrSky sensors and display all data in the transmitter LCD. [Adafruit_BMP280_Libr
 BMP280 running through I2C.
 
 
-In Adafruit_BMP280.h change:
+In **Adafruit_BMP280.h** change:
 ```c++
 #define BMP280_ADDRESS                (0x77)
 ```
@@ -28,7 +36,7 @@ to:
 ```
 
 
-In FrSkySportSensorRpm.cpp change:
+In **FrSkySportSensorRpm.cpp** change:
 ```c++
 void FrSkySportSensorRpm::setData(uint32_t rpm, float t1, float t2)
 {
@@ -46,8 +54,3 @@ void FrSkySportSensorRpm::setData(uint32_t rpm, float t1, float t2)
 	t2Data = (int32_t)round(t2);
 }
 ```
-
-
-For voltage sensor, a resistor divider is needed:
-
-![Voltage divider](/images/voltage-sensor.png)

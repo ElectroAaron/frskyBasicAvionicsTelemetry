@@ -19,7 +19,7 @@
 #include <TimerOne.h>
 #include <TinyGPS++.h>
 #include <Wire.h>
-#include <Adafruit_Sensor.h>
+//#include <Adafruit_Sensor.h>
 #include <Adafruit_BMP280.h>
 #include <math.h>
 #include "FrSkySportSensor.h"
@@ -31,32 +31,34 @@
 #include "FrSkySportTelemetry.h"
 #include "SoftwareSerial.h"
 
+// ====== START USER CONFIG ====== 
+
+//--Voltage Sensor--
+#define BATT_PER_CELL               //Show battery voltage per cell instead of total voltage. Default is voltage per cell.
+#define MAX_CELL_VOLTS        4.20  //V
+#define MIN_CELL_VOLTS        3.30  //V
+#define DIVIDER_UPPER_R       6.80  //KOhm
+#define DIVIDER_LOWER_R       0.47  //KOhm
+#define VOLTAGE_RATE          1.0
+
+//--Barometer Sensor--
+//#define BARO_SEA_ALT  //Show barometer absolute altitude (from sea level) instead of relative altitude (from ground). Default is relative.
+
+// ====== END USER CONFIG ====== 
 
 
-#define BATT_PER_CELL             //Show battery voltage per cell instead of total voltage.
-#define VOLTAGE_PIN       A6        //Analog pin where voltage sensor is connected.
-#define MIN_BAT           3.50      //V per cell when consider battery is empty.
-#define MAX_BAT           4.35      //V per cell at full charge.
-#define VOLTAGE_SAMPLES   100       //Number of samples to filter ADC values.
-#define ADC_RATE          1.8026462498587626450679469109248     //AGH Ion Pro
-//1.6285492767215723196160421580917     //M. CAS II       //ADC multiplier to get volts from ADC level (0 - 1023).
-//1.6899302001269946828808887836638     //M. CAS I
+#define VOLTAGE_PIN           A0    //Analog pin where voltage sensor is connected.
+#define EMA_FILTER_ALPHA      0.10  //Amount of the new value over 1.0 that will be added in each filter loop
+#define EMA_FILTER_UPDATE     20    //ms filter loop time
+#define MAX_ADC               1023  //10 bit ADC
+#define ADC_AREF              1.10  //V from ATMEGA328P internal AREF
+#define GPS_SERIAL            Serial
+#define VSPD_SAMPLES          40
+#define VSPD_MAX_SAMPLES      50
+#define UPDATE_DELAY          1000      //FrSky SmartPort update period (us).
+#define LED_PIN               13        //Status LED, will go on after start up when system is ready to go.
+#define SEA_PRESSURE          1013.25   //Default sea pressure (hPa)
 
-
-
-#define GPS_SERIAL        Serial
-#define GPS_DELAY         100       //ms
-
-//#define BARO_SEA_ALT              //Show barometer absolute altitude (from sea level) instead of relative altitude (from ground). Default is relative.
-#define VSPD_SAMPLES      40
-#define VSPD_MAX_SAMPLES  50
-
-#define UPDATE_DELAY      1000      //FrSky SmartPort update period (us).
-#define LED_PIN           13        //Status LED, will go on after start up when system is ready to go.
-
-#ifdef BARO_SEA_ALT
-#define SEA_PRESSURE      1013.25   //Default sea pressure (hPa)
-#endif
 
 
 
@@ -69,36 +71,20 @@ FrSkySportSensorRpm     rpmFrSky;
 FrSkySportTelemetry     telemetry;
 
 
-
-int cellNum;
-double mainVolts, cellVolts, batteryPercent;
+uint8_t cellNum;
+uint16_t filteredADC, lastFilteredADC;
+float batteryVoltage, cellVoltage, batteryPercent;
+uint32_t lastBatteryRead = 0;
 
 int numSats;
-double gpsLatitude, gpsLongitude, gpsSpeed, gpsCourse, altitudeGPS;
-unsigned long age, startTime, endTime;
+float gpsLatitude, gpsLongitude, gpsSpeed, gpsCourse, altitudeGPS;
 
-double bmpP0;
-double baroAltitude = 0.0, verticalSpeed;
-double tempo = millis();
-double N1 = 0, N2 = 0, N3 = 0, D1 = 0, D2 = 0;
-double alt[51];
-double tim[51];
+float bmpP0, baroAltitude, verticalSpeed, baroTemp;
+float tempo = millis();
+float N1 = 0, N2 = 0, N3 = 0, D1 = 0, D2 = 0;
+float alt[51];
+float tim[51];
 
-
-
-float readVoltage(void) {
-  long voltageSum = 0;
-  for (int i = 0; i < VOLTAGE_SAMPLES; i++) {
-    voltageSum += analogRead(VOLTAGE_PIN);
-    delayMicroseconds(20);
-  }
-  int computeAverage = (int)(voltageSum / (float)VOLTAGE_SAMPLES);
-  mainVolts = (computeAverage * ADC_RATE) / 100.0;
-  cellVolts = mainVolts / (float)cellNum;
-  if ( (cellVolts - MIN_BAT) >= (MAX_BAT - MIN_BAT) ) batteryPercent = 100.0;
-  else if ((cellVolts - MIN_BAT) <= 0.0 ) batteryPercent = 0.0;
-  else batteryPercent = ((cellVolts - MIN_BAT) * 100.0) / (MAX_BAT - MIN_BAT);
-}
 
 
 
@@ -110,33 +96,47 @@ void setup() {
   GPS_SERIAL.begin(57600);
   telemetry.begin(FrSkySportSingleWireSerial::SOFT_SERIAL_PIN_3, &fcsFrSky, &gpsFrSky, &varioFrSky, &rpmFrSky);
   baroSensor.begin();
-  delay(2500);
+  delay(1500);
   bmpP0 = baroSensor.readPressure() / 100.0;    //Set actual default ground pressure to calculate relative altitude, this way it will be 0m at this point (ground).
+  baroAltitude = 0.0;
+  delay(1000);
+  batteryVoltage = ((((float)analogRead(VOLTAGE_PIN) / (float)MAX_ADC * ADC_AREF) * ((float)DIVIDER_UPPER_R + (float)DIVIDER_LOWER_R)) / (float)DIVIDER_LOWER_R) * VOLTAGE_RATE;
+  if (batteryVoltage <= 17.50)
+    cellNum = 4;          //Get number of cells from total voltage.
+  if (batteryVoltage <= 12.70)
+    cellNum = 3;
+  if (batteryVoltage <= 8.50)
+    cellNum = 2;
+
   Timer1.initialize(UPDATE_DELAY);              //Interruption used to send data to FrSky SmartPort.
   Timer1.attachInterrupt(sendData2SPort);
   interrupts();
-  readVoltage();
-  if (mainVolts <= 17.50)
-    cellNum = 4;          //Get number of cells from total voltage.
-  if (mainVolts <= 12.70)
-    cellNum = 3;
-  if (mainVolts <= 8.50)
-    cellNum = 2;
   digitalWrite(LED_PIN, HIGH);                 //Turn on LED when ready to go.
 }
 
 
 
 void loop() {
+
+
   //Voltage
-  readVoltage();            //Read voltage and battery percent
+  if ((millis() - lastBatteryRead) >= EMA_FILTER_UPDATE) {
+    filteredADC = (uint16_t)((EMA_FILTER_ALPHA * analogRead(VOLTAGE_PIN)) + ((1.0 - EMA_FILTER_ALPHA) * lastFilteredADC));
+    lastFilteredADC = filteredADC;
+    batteryVoltage = ((((float)filteredADC / (float)MAX_ADC * ADC_AREF) * ((float)DIVIDER_UPPER_R + (float)DIVIDER_LOWER_R)) / (float)DIVIDER_LOWER_R) * VOLTAGE_RATE;
+    cellVoltage = batteryVoltage / (float)cellNum;
+    batteryPercent = constrain((((cellVoltage - MIN_CELL_VOLTS) / (MAX_CELL_VOLTS - MIN_CELL_VOLTS)) * 100.0), 0.0, 100.0);
+    lastBatteryRead = millis();
+  }
+
 
   //GPS
-  startTime = millis();
-  do {
-    while (GPS_SERIAL.available()) gpsSensor.encode(GPS_SERIAL.read());
-    endTime = millis();
-  } while ( (endTime - startTime) < GPS_DELAY);
+  //startTime = millis();
+  //do {
+  while (GPS_SERIAL.available())
+    gpsSensor.encode(GPS_SERIAL.read());
+  // endTime = millis();
+  //} while ( (endTime - startTime) < GPS_DELAY);
 
   if (gpsSensor.location.isValid()) {
     gpsLatitude = gpsSensor.location.lat();
@@ -145,7 +145,6 @@ void loop() {
     gpsLatitude = 0.0000000;
     gpsLongitude = 0.0000000;
   }
-
 
   if (gpsSensor.speed.isValid()) {
     gpsSpeed = gpsSensor.speed.mps();
@@ -165,11 +164,11 @@ void loop() {
     gpsCourse = 0.0;
   }
 
-/*
-  if (gpsSensor.satellites() > 50) numSats = 0;
-  else numSats = gpsSensor.satellites();
+  /*
+    if (gpsSensor.satellites() > 50) numSats = 0;
+    else numSats = gpsSensor.satellites();
 
-*/
+  */
 
 
   //Barometer
@@ -178,6 +177,7 @@ void loop() {
 #else
   baroAltitude = baroSensor.readAltitude(bmpP0);
 #endif
+  baroTemp = baroSensor.readTemperature();
   tempo = millis();
   N1 = 0;
   N2 = 0;
@@ -203,13 +203,13 @@ void loop() {
 
 
 #ifdef BATT_PER_CELL
-  fcsFrSky.setData(0, cellVolts);
+  fcsFrSky.setData(0, cellVoltage);
 #else
-  fcsFrSky.setData(0, mainVolts);
+  fcsFrSky.setData(0, batteryVoltage);
 #endif
   gpsFrSky.setData(gpsLatitude, gpsLongitude, altitudeGPS, gpsSpeed, gpsCourse, 0, 0, 0, 0, 0, 0);
   varioFrSky.setData(baroAltitude, verticalSpeed);
-  rpmFrSky.setData(numSats, baroSensor.readTemperature(), batteryPercent);
+  rpmFrSky.setData(numSats, baroTemp, batteryPercent);
 }
 
 
